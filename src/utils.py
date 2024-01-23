@@ -8,6 +8,7 @@ import config
 import statistics
 import copy
 import matplotlib.pyplot as plt
+import matplotlib
 import seaborn as sns
 import torch.nn as nn
 from sklearn.metrics import *
@@ -55,6 +56,67 @@ class Focal_MultiLabel_Loss(nn.Module):
 #データバッチの中を陽性と陰性1:1にして、オーバーサンプリングして集める
 #ここを画像とラベルを別々で渡すのではなく、Datasetで渡す、という仕様に変えれば良い。
 #SamplerというかもうDataloader
+# ここ、一般化してクラスnでもできるようにする。
+
+class QuatroOverSampler:
+    def __init__(self,dataset,n_samples):
+        imgs = torch.empty(0)
+        labels = torch.empty(0)
+
+        #datasetをtorch.Tensorとして取り出す
+        for i in range(len(dataset)):
+            img = dataset[i][0]
+            imgs = torch.cat((imgs,img),0)
+            label = torch.Tensor([np.argmax(dataset[i][1].detach().cpu().numpy())])
+            labels = torch.cat((labels,label))
+
+        self.features = imgs
+        self.labels = labels
+
+        label_counts = np.bincount(labels)
+        major_label = label_counts.argmax()
+        mid_label = np.argsort(label_counts)[-2]
+        mid_label2 = np.argsort(label_counts)[-3]
+        minor_label = label_counts.argmin()
+
+        self.major_indices = np.where(labels == major_label)[0]
+        self.mid_indices = np.where(labels == mid_label)[0]
+        self.mid2_indices = np.where(labels == mid_label2)[0]
+        self.minor_indices = np.where(labels == minor_label)[0]
+
+        np.random.shuffle(self.major_indices)
+        np.random.shuffle(self.mid_indices)
+        np.random.shuffle(self.mid2_indices)
+        np.random.shuffle(self.minor_indices)
+
+        self.used_indices = 0  #多数クラスの中で使用したインデックスの数
+        self.count = 0 #多数クラスの中で使用したサンプル数の数
+        self.n_samples = n_samples
+        self.batch_size = self.n_samples * 4
+
+    def __iter__(self):
+        self.count = 0
+        self.used_indices = 0
+        while self.count + self.n_samples < len(self.major_indices):
+            # 多数派データ(major_indices)からは順番に選び出し
+            # 少数派データ(minor_indices)からはランダムに選び出す操作を繰り返す
+            indices = self.major_indices[self.used_indices:self.used_indices + self.n_samples].tolist() + np.random.choice(self.mid2_indices, self.n_samples, replace=False).tolist() + np.random.choice(self.mid_indices, self.n_samples, replace=False).tolist() + np.random.choice(self.minor_indices, self.n_samples, replace=False).tolist()
+            np.random.shuffle(indices)
+
+            labels = torch.empty(0)
+            for index in indices:
+                np.argmax(self.labels[index].detach().cpu().numpy())
+                label = torch.eye(config.n_class)[self.labels[index].detach().cpu().numpy()]
+                label = label.unsqueeze(0)
+                labels = torch.cat((labels,label))
+
+            yield torch.tensor(self.features[indices]), labels,0
+
+            self.used_indices += self.n_samples
+            self.count += self.n_samples
+
+    def __len__(self):
+        return len(self.major_indices)//self.n_samples + 1
 
 class TripleOverSampler:
     def __init__(self,dataset,n_samples):
@@ -170,6 +232,66 @@ class BinaryOverSampler:
     def __len__(self):
         return len(self.major_indices)//self.n_samples + 1
 
+class QuatroUnderSampler:
+    def __init__(self,dataset,n_samples):
+        imgs = torch.empty(0)
+        labels = torch.empty(0)
+
+        #datasetをtorch.Tensorとして取り出す
+        for i in range(len(dataset)):
+            img = dataset[i][0]
+            imgs = torch.cat((imgs,img),0)
+            label = torch.Tensor([np.argmax(dataset[i][1].detach().cpu().numpy())])
+            labels = torch.cat((labels,label))
+
+        self.features = imgs
+        self.labels = labels
+
+        label_counts = np.bincount(labels)
+        major_label = label_counts.argmax()
+        mid_label = np.argsort(label_counts)[-2]
+        mid_label2 = np.argsort(label_counts)[-3]
+        minor_label = label_counts.argmin()
+
+        self.major_indices = np.where(labels == major_label)[0]
+        self.mid_indices = np.where(labels == mid_label)[0]
+        self.mid2_indices = np.where(labels == mid_label2)[0]
+        self.minor_indices = np.where(labels == minor_label)[0]
+
+        np.random.shuffle(self.major_indices)
+        np.random.shuffle(self.mid_indices)
+        np.random.shuffle(self.mid2_indices)
+        np.random.shuffle(self.minor_indices)
+
+        self.used_indices = 0  #(少数クラスの中で使用したインデックスの数)
+        self.count = 0
+        self.n_samples = n_samples
+        self.batch_size = self.n_samples * 4
+
+    def __iter__(self):
+        self.count = 0
+        self.used_indices = 0
+        while self.count + self.n_samples < len(self.major_indices):
+            # 全てのデータ(major_indices)から順番に選び出す
+            # 少数派データ(minor_indices)が1周したタイミングで1epochを終える
+            indices = self.major_indices[self.used_indices:self.used_indices + self.n_samples].tolist() + self.mid2_indices[self.used_indices:self.used_indices + self.n_samples].tolist() + self.mid_indices[self.used_indices:self.used_indices + self.n_samples].tolist() + self.minor_indices[self.used_indices:self.used_indices + self.n_samples].tolist()
+            np.random.shuffle(indices)
+
+            labels = torch.empty(0)
+            for index in indices:
+                np.argmax(self.labels[index].detach().cpu().numpy())
+                label = torch.eye(config.n_class)[self.labels[index].detach().cpu().numpy()]
+                label = label.unsqueeze(0)
+                labels = torch.cat((labels,label))
+
+            yield torch.tensor(self.features[indices]), labels,0
+
+            self.used_indices += self.n_samples
+            self.count += self.n_samples
+
+    def __len__(self):
+        return len(self.minor_indices)//self.n_samples + 1
+
 class TripleUnderSampler:
     def __init__(self,dataset,n_samples):
         imgs = torch.empty(0)
@@ -256,7 +378,7 @@ class BinaryUnderSampler:
         
         self.used_indices = 0
         self.count = 0
-        self.n_samples = n_samples
+        self.n_samples = n_samples #1バッチで使用する少数派データの数
         self.batch_size = self.n_samples * 2
 
     def __iter__(self):
@@ -277,7 +399,7 @@ class BinaryUnderSampler:
             yield torch.tensor(self.features[indices]), labels,0
             
             self.used_indices += self.n_samples
-            self.count += self.n_samples * 2
+            self.count += self.n_samples #少数派データを使用したサンプル数の数
 
         #長さは少数の陽性サンプルの長さと同じ
         def __len__(self):
@@ -446,23 +568,6 @@ def CataractTypeToInt(cataract_type):
     elif cataract_type == 'P':
         return 8
 
-def make_PRC(labels,preds,save_fig_path):
-        precisions, recalls, thresholds = precision_recall_curve(labels, preds)
-        print(precisions,recalls,thresholds)
-        try:
-            pr_auc = auc(recalls, precisions)
-        except:
-            pr_auc = 0
-        fig,ax = plt.subplots(figsize=(6,6))
-        plt.plot(precisions,recalls,label = 'PR curve (area = %.3f'%pr_auc)
-        plt.legend()
-        plt.title('PR curve')
-        plt.xlabel('Recall')
-        plt.ylabel('Precision')
-        plt.grid(True)
-        fig.savefig(save_fig_path)
-        print(save_fig_path)
-
 def make_ROC(labels,preds,save_fig_path):
         fpr,tpr,threshold = roc_curve(labels,preds)
         fig,ax = plt.subplots(figsize=(6,6))
@@ -476,34 +581,108 @@ def make_ROC(labels,preds,save_fig_path):
 
 def make_ConfusionMatrix(cm,save_fig_path):
         fig,ax = plt.subplots(figsize=(6,6))
-        sns.set(font_scale=1.8)
+        sns.set(font="IPAexGothic",font_scale=1.8)  
         sns.heatmap(cm,square=True,cbar=True,annot=True,cmap='Blues',fmt='d')
-        ax.set_ylabel('Answers',fontsize=18)
-        ax.set_xticklabels([0,1],fontsize=20)
-        ax.set_yticklabels([0,1],fontsize=20)
-        ax.set_xlabel('Preds',fontsize=18)
+        ax.set_ylabel('正解値',fontsize=18)
+        ax.set_xticklabels(['1','2','3≦'],fontsize=20)
+        ax.set_yticklabels(['1','2','3≦'],fontsize=20)
+        ax.set_xlabel('予測値',fontsize=18)
         ax.set_title('Confusion Matrix',fontsize=20)
         fig.savefig(save_fig_path)
+
+def make_PRC(labels,preds,save_fig_path,n_class):
+    #PR-AUCのマクロ平均を求める
+
+    pr_auc_list = []
+    fig,axes = plt.subplots(n_class,1,tight_layout=True,figsize=(6,12))
+
+    for i in range(n_class):
+        #クラスiが陽性、それ以外が陰性のときのPR曲線を求める。
+        preds_cpy = copy.deepcopy(preds)
+        #クラスiである確率だけ取り出す。
+        preds_cpy = preds_cpy[:,i]
+
+        labels_cpy = copy.deepcopy(labels)
+        labels_cpy = labels_cpy[:,i]
+
+        precisions, recalls, thresholds = precision_recall_curve(labels_cpy, preds_cpy)
+        precisions = np.insert(precisions,0,0)
+        precisions = np.append(precisions,1)
+        recalls = np.insert(recalls,0,1)
+        recalls = np.append(recalls,0)
+
+        try:
+            pr_auc = auc(recalls, precisions)
+        except:
+            pr_auc = 0
+        
+        sns.set_style("whitegrid", {'grid.linestyle': '--'})
+        sns.set_palette("Set3",desat=1.0)
+        matplotlib.rcParams["font.family"] = 'IPAexGothic'
+        sns.lineplot(x=precisions, y=recalls, ci=None,ax=axes[i])
+        #axes[i].plot(precisions,recalls,label = 'PR curve (area = %.3f'%pr_auc)
+        axes[i].set_title('PR curve Positive Class = ' + str(i+1))
+        axes[i].grid(True)
+        axes[i].set_xlim(-0.1,1.1)
+        axes[i].set_ylim(-0.1,1.1)
+        axes[i].set_xlabel('Recall')
+        axes[i].set_ylabel('Precision')
+        
+    fig.savefig(save_fig_path)
+
+def make_PRBar(labels,preds,save_fig_path,n_class):
+    #PR-AUCのマクロ平均を求める
+    pr_auc_list = []
+    #sns.set(font="IPAexGothic",font_scale=1.8)
+    sns.set_style("whitegrid", {'grid.linestyle': '--'})
+    sns.set_palette("Set3",desat=1.0)
+    matplotlib.rcParams["font.family"] = 'IPAexGothic'
+    fig,ax = plt.subplots(figsize=(8,8))
+
+    for i in range(n_class):
+        #クラスiが陽性、それ以外が陰性のときのPR曲線を求める。
+        preds_cpy = copy.deepcopy(preds)
+        #クラスiである確率だけ取り出す。
+        preds_cpy = preds_cpy[:,i]
+
+        labels_cpy = copy.deepcopy(labels)
+
+        labels_cpy = labels_cpy[:,i]
+
+        precisions, recalls, thresholds = precision_recall_curve(labels_cpy, preds_cpy)
+        try:
+            pr_auc = auc(recalls, precisions)
+        except:
+            pr_auc = 0
+        
+        pr_auc_list.append(pr_auc)
+        
+    ax.bar(list(range(n_class)),pr_auc_list,width=0.45)
+    #ax.set_xticklabels(["","1","","2","","≧3"],fontsize=15)
+    ax.set_yticklabels(["0","0.2","0.4","0.6","0.8","1.0"],fontsize=15)
+    ax.set_title('陽性クラスに対するPR-AUC値',fontsize=20)
+    ax.set_xlabel('陽性クラス',fontsize=18)
+    ax.set_ylabel('PR-AUC値',fontsize=18)
+    ax.set_ylim(0,1)
+        
+    fig.savefig(save_fig_path)
+    print(save_fig_path)
 
 def macro_pr_auc(labels,preds,n_class):
         #PR-AUCのマクロ平均を求める
         pr_auc_list = []
-        print(labels,preds)
         for i in range(n_class):
             #クラスiが陽性、それ以外が陰性のときのPR曲線を求める。
             preds_cpy = copy.deepcopy(preds)
-            for j in range(len(preds_cpy)):
-                if preds_cpy[j] == i:
-                    preds_cpy[j] = 1
-                else:
-                    preds_cpy[j] = 0
+            preds_cpy = preds_cpy[:,i]
 
             labels_cpy = copy.deepcopy(labels)
-            for j in range(len(labels_cpy)):
-                if labels_cpy[j] == i:
-                    labels_cpy[j] = 1
-                else:
-                    labels_cpy[j] = 0
+
+            #1次元配列の時はラベルの値をワンホット表現に変換する
+            if labels_cpy.ndim == 1:
+                labels_cpy = np.identity(n_class)[labels_cpy]
+
+            labels_cpy = labels_cpy[:,i]
 
             precisions, recalls, thresholds = precision_recall_curve(labels_cpy, preds_cpy)
             try:
@@ -512,4 +691,66 @@ def macro_pr_auc(labels,preds,n_class):
                 pr_auc = 0
             pr_auc_list.append(pr_auc)
         print(pr_auc_list)
+        
         return statistics.mean(pr_auc_list)
+
+def macro_f1(labels,preds,n_class):
+        #PR-AUCのマクロ平均を求める
+        f1_list = []
+        for i in range(n_class):
+            #クラスiが陽性、それ以外が陰性のときのPR曲線を求める。
+            preds_cpy = copy.deepcopy(preds)
+            #1次元配列の時はワンホット表現に変換する
+            if preds_cpy.ndim == 1:
+                preds_cpy = np.identity(n_class)[preds_cpy]
+            preds_cpy = preds_cpy[:,i]
+
+            labels_cpy = copy.deepcopy(labels)
+
+            #1次元配列の時はラベルの値をワンホット表現に変換する
+            if labels_cpy.ndim == 1:
+                labels_cpy = np.identity(n_class)[labels_cpy]
+
+            labels_cpy = labels_cpy[:,i]
+
+            f1 = f1_score(labels_cpy, preds_cpy)
+            f1_list.append(f1)
+        print(f1_list)
+        return statistics.mean(f1_list)
+
+def make_F1Bar(labels,preds,save_fig_path,n_class):
+    #PR-AUCのマクロ平均を求める
+    f1_list = []
+    #sns.set(font="IPAexGothic",font_scale=1.8)
+    sns.set_style("whitegrid", {'grid.linestyle': '--'})
+    sns.set_palette("Set3",desat=1.0)
+    matplotlib.rcParams["font.family"] = 'IPAexGothic'
+    fig,ax = plt.subplots(figsize=(8,8))
+
+    for i in range(n_class):
+        #クラスiが陽性、それ以外が陰性のときのPR曲線を求める。
+        preds_cpy = copy.deepcopy(preds)
+        #1次元配列の時はワンホット表現に変換する
+        if preds_cpy.ndim == 1:
+            preds_cpy = np.identity(n_class)[preds_cpy]
+        preds_cpy = preds_cpy[:,i]
+
+        labels_cpy = copy.deepcopy(labels)
+
+        #1次元配列の時はラベルの値をワンホット表現に変換する
+        if labels_cpy.ndim == 1:
+            labels_cpy = np.identity(n_class)[labels_cpy]
+
+        labels_cpy = labels_cpy[:,i]
+        f1 = f1_score(labels_cpy, preds_cpy)
+        f1_list.append(f1)
+        
+    ax.bar(list(range(n_class)),f1_list,width=0.45)
+    #ax.set_xticklabels(["","1","","2","","≧3"],fontsize=15)
+    ax.set_yticklabels(["0","0.2","0.4","0.6","0.8","1.0"],fontsize=15)
+    ax.set_title('陽性クラスに対するF1値',fontsize=20)
+    ax.set_xlabel('陽性クラス',fontsize=18)
+    ax.set_ylabel('F1値',fontsize=18)
+    ax.set_ylim(0,1)
+        
+    fig.savefig(save_fig_path)

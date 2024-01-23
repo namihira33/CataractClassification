@@ -66,12 +66,13 @@ class OCThorizontalDatasetBase(Dataset):
         pass
 
         
-# 症状なし:0 症状あり :1
 class OCThorizontalDataset(OCThorizontalDatasetBase):
     def get_label(self, label_base):
         if label_base == 1:
             return 0
         elif label_base == 2:
+            return 1
+        elif label_base == 3:
             return 1
         else:
             return 2

@@ -51,18 +51,31 @@ def plot_Loss(dir_path,lossList,lr,preprocess):
         plt.legend()
         plt.savefig(os.path.join(dir_path,'Loss_') + '{:%y%m%d-%H:%M}'.format(datetime.now()) + '.png')
 
-def calc_class_inverse_weight(dataset):
+def calc_class_count(dataset,n_class):
+    #データセットからラベルの値を一つずつ取り出して、クラス数を計算する
+    class_count = [0] * n_class
+
+    for i in range(len(dataset)):
+        label = int([np.argmax(dataset[i][1].detach().cpu().numpy())][0])
+        class_count[label] += 1
+
+    #labelsを元に各クラスの数を計算する
+    print(class_count)
+    return class_count
+
+
+def calc_class_inverse_weight(dataset,n_class):
     #各クラス数をカウントする / 逆数の場合
-    class_count = [202,202,249]
+    class_count = calc_class_count(dataset,n_class)
     class_weight = [torch.Tensor([n**(-1) * sum(class_count)]) for n in class_count]
 
     print(class_weight)
     return torch.Tensor(class_weight)
 
-def calc_class_weight(dataset,beta):
-    class_count = [202,202,249]
+def calc_class_weight(dataset,n_class,beta):
+    class_count = calc_class_count(dataset,n_class) #これをデータセットから計算する関数が必要
     if beta == -1:
-        return calc_class_inverse_weight(dataset)
+        return calc_class_inverse_weight(dataset,n_class)
     elif beta == 0:
         class_weight = [torch.Tensor([1]) for n in range(config.n_class)]
         print(class_weight)
@@ -129,8 +142,11 @@ class Trainer():
                 learning_index,valid_index = calc_dataset_index(learning_id_index,valid_id_index,'train',self.c['n_per_unit'])
                 learning_dataset = Subset(self.dataset['train'],learning_index)
 
+                #訓練データの各クラス数をカウントしないといけないのでは？
+                
                 #self.class_weight = calc_class_inverse_weight(learning_dataset)
-                self.class_weight = calc_class_weight(learning_dataset,beta=self.c['beta'])
+                self.class_weight = calc_class_weight(learning_dataset,config.n_class,beta=self.c['beta'])
+                calc_class_count(learning_dataset,config.n_class)
                 #self.criterion = nn.BCELoss(weight=self.class_weight.to(device))
                 self.criterion = Focal_MultiLabel_Loss(gamma=self.c['gamma'],weights=self.class_weight.to(device))
 
@@ -139,9 +155,9 @@ class Trainer():
                 if self.c['sampler'] == 'normal':
                     self.dataloaders['learning'] = DataLoader(learning_dataset,self.c['bs'],num_workers=os.cpu_count(),shuffle=True)
                 elif self.c['sampler'] == 'over':
-                    self.dataloaders['learning'] = TripleOverSampler(learning_dataset,self.c['bs']//config.n_class)
+                    self.dataloaders['learning'] = QuatroOverSampler(learning_dataset,self.c['bs']//config.n_class)
                 elif self.c['sampler'] == 'under':
-                    self.dataloaders['learning'] = TripleUnderSampler(learning_dataset,self.c['bs']//config.n_class)
+                    self.dataloaders['learning'] = QuatroUnderSampler(learning_dataset,self.c['bs']//config.n_class)
 
                 if not self.c['evaluate']:
                     valid_dataset = Subset(self.dataset['train'],valid_index)
@@ -281,10 +297,10 @@ class Trainer():
         except:
             roc_auc = 0
 
+        pr_auc = macro_pr_auc(labels,preds,config.n_class)
 
-        threshold = 0.5
-        preds[preds > threshold] = 1
-        preds[preds <= threshold] = 0
+
+        #予測値決定後のスコア (マクロ平均)を求める
 
         preds = np.argmax(preds,axis=1)
         #labels = np.argmax(labels,axis=1)
@@ -292,11 +308,6 @@ class Trainer():
         total_loss /= len(preds)
         recall = recall_score(labels,preds,average='macro')
         precision = precision_score(labels,preds,average='macro')
-
-        #PR-AUCのマクロ平均を求める
-
-
-        pr_auc = macro_pr_auc(labels,preds,config.n_class)
         f1 = f1_score(labels,preds,average='macro')
         confusion_Matrix = confusion_matrix(labels,preds)
         try:
